@@ -68,7 +68,7 @@ fun ParagonScreen(viewModel: AppViewModel) {
             Spacer(Modifier.height(16.dp))
             Slider(
                 value = viewModel.paragonLevel.toFloat(),
-                onValueChange = { viewModel.setParagonLevel(it.toInt()) },
+                onValueChange = { viewModel.updateParagonLevel(it.toInt()) },
                 valueRange = 0f..10000f,
                 colors = SliderDefaults.colors(thumbColor = PrimaryAccent, activeTrackColor = PrimaryAccent),
             )
@@ -79,10 +79,10 @@ fun ParagonScreen(viewModel: AppViewModel) {
                         text = if (delta > 0) "+$delta" else "$delta",
                         bg = SurfaceContainer,
                         fg = TextPrimary,
-                        onClick = { viewModel.setParagonLevel(viewModel.paragonLevel + delta) },
+                        onClick = { viewModel.updateParagonLevel(viewModel.paragonLevel + delta) },
                     )
                 }
-                SmallPill("MAX", bg = PrimaryContainer, fg = PrimaryAccent, onClick = { viewModel.setParagonLevel(10000) })
+                SmallPill("MAX", bg = PrimaryContainer, fg = PrimaryAccent, onClick = { viewModel.updateParagonLevel(10000) })
             }
         }
 

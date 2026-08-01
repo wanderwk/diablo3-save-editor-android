@@ -155,7 +155,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
 
     // ── Paragon / heroes ─────────────────────────────────────────────────
 
-    fun setParagonLevel(level: Int) {
+    fun updateParagonLevel(level: Int) {
         val info = saveInfo ?: return
         val clamped = level.coerceIn(0, ParagonRepository.PARAGON_MAX)
         paragonLevel = clamped
