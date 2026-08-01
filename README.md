@@ -69,12 +69,19 @@ duplicate slot entries.
 
 ## Building
 
-CI builds a debug-signed release APK via GitHub Actions
-(`.github/workflows/build.yml`) — no keystore secret needed, so the APK can
-be installed directly. To build locally you'll need Android Studio /
-a JDK 17 + Android SDK (compileSdk 34) environment; there's no committed
-Gradle wrapper, so either open in Android Studio (which provisions Gradle
-itself) or install Gradle 8.7 and run `gradle assembleRelease`.
+CI builds a release APK via GitHub Actions (`.github/workflows/build.yml`),
+signed with `app/ci-release.keystore` — a keystore committed to the repo
+(not a real secret: no Play Store distribution, sideloaded APK only), so
+the APK can be installed directly with no GitHub secret needed. This
+replaced signing with AGP's auto-managed `~/.android/debug.keystore` after
+that caused a real bug (see "Release-build integrity check" below) — a
+*stable*, known-ahead-of-time keystore is required for the anti-tamper
+hash to ever be correct, and an ambiguous auto-generated one isn't
+guaranteed to be. To build locally you'll need Android Studio / a JDK 17 +
+Android SDK (compileSdk 34) + NDK (26.1.10909125) environment; there's no
+committed Gradle wrapper, so either open in Android Studio (which
+provisions Gradle itself) or install Gradle 8.7 and run
+`gradle assembleRelease`.
 
 ## Release-build integrity check
 
@@ -93,14 +100,27 @@ bar against casual repackaging/resigning:
   on mismatch. Deliberately decoupled from the native layer in code path,
   timing, and naming, so defeating one doesn't imply the other was too.
 
-Both layers compare against a SHA-256 hash of the actual debug-keystore
-signing certificate, computed once at Gradle configuration time
-(`app/build.gradle.kts`) and baked in via a C++ compiler define + a
-`BuildConfig` field — so it always matches whatever really signs that
-build, on any machine/CI runner. Both layers fail *open* (do nothing) on
-any unexpected JNI/PackageManager anomaly, and only act on a cleanly
-computed, confirmed mismatch — this is a personal-use tool, so a false
-positive bricking a legitimate install is worse than a missed edge case.
+Both layers compare against a SHA-256 hash of `app/ci-release.keystore`'s
+certificate (the same keystore the release build type actually signs
+with — see "Building" above for why this has to be a fixed, committed
+keystore rather than AGP's auto-managed debug one), computed once at
+Gradle configuration time (`app/build.gradle.kts`) and baked in via a C++
+compiler define + a `BuildConfig` field. Both layers fail *open* (do
+nothing) on any unexpected JNI/PackageManager anomaly, and only act on a
+cleanly computed, confirmed mismatch — this is a personal-use tool, so a
+false positive bricking a legitimate install is worse than a missed edge
+case.
+
+**2026-08-01 incident**: the very first release build of this feature
+self-killed on launch for a real, legitimately-signed install. Root cause:
+`keytool -genkeypair` without `-storetype` defaults to PKCS12 on modern
+JDKs, but AGP's internal debug-keystore creator expects/writes JKS —
+finding a PKCS12 file where it expected JKS, AGP silently discarded it and
+generated its own JKS keystore with a fresh random keypair for the actual
+signing step, so the hash baked into the native lib (read before that
+silent regeneration) no longer matched the real signing certificate.
+Fixed by switching signing to `ci-release.keystore` entirely, removing
+AGP's debug-keystore machinery from the picture.
 
 ## Testing
 

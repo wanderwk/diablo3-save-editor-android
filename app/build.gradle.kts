@@ -5,33 +5,36 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-// Computed once at Gradle configuration time and reused for BOTH the native
-// (C++ compiler define, app/src/main/cpp/storage_sync.cpp) and Java
-// (BuildConfig field, util/CacheWarmup.kt) signing-certificate checks below.
-// Deriving it from the *actual* debug keystore this machine/CI runner will
-// sign the release APK with (rather than a value precomputed once and
-// hardcoded) means it's always correct regardless of which keystore ends up
-// being used -- no risk of embedding a stale constant that doesn't match
-// the real signature and bricks a legitimate release build.
+// Root cause of a real shipped bug (2026-08-01): this used to be derived
+// from `signingConfigs.getByName("debug")` -- AGP's own auto-managed
+// `~/.android/debug.keystore`. That broke in CI: `keytool -genkeypair`
+// without an explicit `-storetype` defaults to PKCS12 on modern JDKs, but
+// AGP's internal debug-keystore creator expects/writes JKS. When AGP found
+// our PKCS12 file at that path, it silently treated it as invalid and
+// regenerated its own JKS keystore with a FRESH random keypair for the
+// actual signing step -- by which point the hash we'd already baked into
+// the native lib (read from OUR file, before AGP's silent regeneration)
+// no longer matched the certificate the release APK actually got signed
+// with. Every release install self-killed ~1s after launch, silently
+// (exactly the native layer's intended behavior for a real mismatch --
+// just triggered by our own build, not a repackaging attempt).
+//
+// Fix: stop touching AGP's magic "debug" signing config entirely. Use our
+// own committed keystore (`ci-release.keystore`, PKCS12, checked into git
+// below `d3savereleasekey`/`signingConfigs.create("ciRelease")`) as the
+// single source of truth for BOTH the actual release signing AND this
+// hash -- so there is no second, independent keystore-creation code path
+// that can silently diverge from what real signing uses. It's not a real
+// secret (same philosophy as the debug-keystore approach this replaces:
+// no Play Store distribution, sideloaded APK only), just now a *stable*
+// one instead of an ambiguous auto-generated one.
 val expectedSigHashHex: String = run {
-    val keystoreDir = File(System.getProperty("user.home"), ".android")
-    val keystoreFile = File(keystoreDir, "debug.keystore")
-    if (!keystoreFile.exists()) {
-        keystoreDir.mkdirs()
-        ProcessBuilder(
-            "keytool", "-genkeypair", "-v",
-            "-keystore", keystoreFile.absolutePath,
-            "-storepass", "android", "-keypass", "android",
-            "-alias", "androiddebugkey",
-            "-dname", "CN=Android Debug,O=Android,C=US",
-            "-keyalg", "RSA", "-keysize", "2048", "-validity", "10950",
-        ).redirectErrorStream(true).start().waitFor()
-    }
+    val keystoreFile = file("ci-release.keystore")
     try {
         val certProcess = ProcessBuilder(
             "keytool", "-exportcert",
             "-keystore", keystoreFile.absolutePath,
-            "-storepass", "android", "-alias", "androiddebugkey",
+            "-storepass", "d3save-ci-2026", "-alias", "d3savereleasekey",
         ).start()
         val certBytes = certProcess.inputStream.readBytes()
         certProcess.waitFor()
@@ -73,12 +76,25 @@ android {
         }
     }
 
+    signingConfigs {
+        create("ciRelease") {
+            storeFile = file("ci-release.keystore")
+            storeType = "PKCS12"
+            storePassword = "d3save-ci-2026"
+            keyAlias = "d3savereleasekey"
+            keyPassword = "d3save-ci-2026"
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the debug key so the APK can be installed directly
-            // without needing a release keystore/secret in CI.
-            signingConfig = signingConfigs.getByName("debug")
+            // Signed with a keystore committed to the repo (not a real secret --
+            // no Play Store distribution, sideloaded APK only) so the APK can be
+            // installed directly, AND so it's stable/known ahead of time for the
+            // anti-tamper hash below. See expectedSigHashHex's comment for why
+            // this replaced AGP's own auto-managed debug keystore.
+            signingConfig = signingConfigs.getByName("ciRelease")
             buildConfigField("String", "EXPECTED_SIG_HASH_HEX", "\"$expectedSigHashHex\"")
             externalNativeBuild {
                 cmake {
