@@ -21,7 +21,6 @@ import com.wanderwk.d3saveeditor.ui.screens.ExportScreen
 import com.wanderwk.d3saveeditor.ui.screens.GemsScreen
 import com.wanderwk.d3saveeditor.ui.screens.HomeScreen
 import com.wanderwk.d3saveeditor.ui.screens.ItemsScreen
-import com.wanderwk.d3saveeditor.ui.screens.LicenseGateScreen
 import com.wanderwk.d3saveeditor.ui.screens.ParagonScreen
 import com.wanderwk.d3saveeditor.ui.screens.SupportScreen
 import com.wanderwk.d3saveeditor.ui.theme.BgBase
@@ -33,11 +32,6 @@ enum class AppTab(val label: String) {
 
 @Composable
 fun AppRoot(viewModel: AppViewModel) {
-    if (!viewModel.licenseUnlocked) {
-        LicenseGateScreen(viewModel)
-        return
-    }
-
     var currentTab by remember { mutableStateOf(AppTab.HOME) }
 
     Scaffold(

@@ -2,9 +2,10 @@
 
 Native Android app (Kotlin + Jetpack Compose, Material You) for editing
 **offline** Diablo III (Switch/Yuzu-style) save files: currencies, paragon
-level, hero level, inventory/stash items, and a simplified "apply gem to
-item" flow. Not affiliated with Blizzard Entertainment — personal-use tool
-for save files you already own.
+level, hero level, inventory/stash items (including stack quantity), and
+real per-item gem sockets. Not affiliated with Blizzard Entertainment —
+personal-use tool for save files you already own. No license/unlock gate:
+launch straight into the app.
 
 This is a from-scratch native rewrite of a reference Python CLI/Tk toolset
 (`diablo_code/`), following the visual design handoff in
@@ -28,22 +29,43 @@ Cinzel + Roboto, dark Diablo III mood).
   entries (same entry layout as hero items).
 - **Hero name/level/class/highest Greater Rift**: `hero.dat` field 2 →
   fields 3/5/4/25.
-- **Hero inventory/equipment**: `hero.dat` field 6 → repeated field 1 item
-  entries (`uid`, `slot`, item `blob` with `gbid`/`quality`/`level`).
+- **Hero inventory/equipment**: `hero.dat` field 6 → repeated field 1
+  `SavedItem` entries. Real field layout (not the reference Python tool's
+  guess — see "Item/gem field layout" below):
+  `id` (field 1), `used_socket_count` (field 7), `generator` (field 8,
+  a `Generator` message carrying `seed`/`gb_handle{gbid}`/`stack_size`/
+  `item_quality_level`/`contents` (socketed gems)/`legendary_item_level`).
 
 See `core/*.kt` for the full port with inline comments pointing back at the
 reference Python module each piece came from.
 
-### Known simplification: Gems screen
+### Item/gem field layout
 
-The reference Python tool never reverse-engineered a real per-item "gem
-socket" sub-message — its own gem UI works by directly overwriting the
-target item's GBID with a gem's GBID. This app ports that same (limited)
-behavior honestly rather than inventing an unverified byte layout that
-could corrupt a save. The Items screen otherwise supports adding new items
-(creates new slot entries — this *is* how the format really represents
-"quantity" for stackable materials/gems, there's no separate stack-count
-field either).
+The reference Python tool's `protobuf_handler.py` guessed at the item blob
+layout and got it wrong (it read a per-instance random `seed` as if it were
+the item's `gbid`, among other mistakes) — every item/gem used to show up
+as "Item Desconhecido". This was fixed by cross-referencing the real
+`Items.proto` (compiled Python descriptors from
+[GoobyCorp/D3Edit](https://github.com/GoobyCorp/D3Edit)) and validating the
+corrected layout byte-for-byte against a real Switch save sample.
+
+Real gem sockets were found the same way: a socketed gem is **not** a
+separate top-level item, and applying a gem does **not** overwrite the host
+item's own `gbid` (that was the old, admittedly-hacky behavior). It's an
+`EmbeddedGenerator{id, generator}` entry inside the host item's
+`Generator.contents` (field 13, repeated) — its own nested `Generator` has
+the exact same `gb_handle{gbid}` structure as a top-level item. `used_socket_count`
+(`SavedItem` field 7) tracks how many are filled. The save does **not**
+store an item's total socket *capacity* (that's static game-balance data
+looked up by `gbid` at runtime, same as damage/armor), so this app doesn't
+enforce a socket cap — see `core/ItemRepository.kt`'s top-of-file doc
+comment and `addGemToItem`/`removeGemFromItem` for the implementation, and
+`ItemRepositoryTest.kt` for a synthetic-data regression test covering both
+the item-field fix and the gem-socket read/write path.
+
+Stackable item quantity (`Generator.stack_size`, field 8) is a real field
+too — editable directly in the Items screen, no need to fake it with
+duplicate slot entries.
 
 ## Building
 
@@ -53,6 +75,22 @@ be installed directly. To build locally you'll need Android Studio /
 a JDK 17 + Android SDK (compileSdk 34) environment; there's no committed
 Gradle wrapper, so either open in Android Studio (which provisions Gradle
 itself) or install Gradle 8.7 and run `gradle assembleRelease`.
+
+## Testing
+
+- **Unit tests** (`gradle testDebugUnitTest`) run on every CI build — plain
+  JUnit tests for the `core.*` save-format logic (`ItemRepositoryTest.kt`,
+  etc.) plus Robolectric tests that need a real `Context`/`AssetManager`
+  (`ItemCatalogTest.kt`).
+- **Instrumented Compose UI tests** (`app/src/androidTest/.../ScreensUiTest.kt`)
+  cover all 7 main screens (Home, Coins, Items, Gems, Paragon, Export,
+  Support) plus a bottom-nav navigation walkthrough (`AppRootNavigationTest`).
+  These need a real device/emulator, so they're **not** part of the main
+  push pipeline (GitHub's free-tier hosted runners only get hardware
+  emulator acceleration on public repos) — run them manually via the
+  "Instrumented UI Tests" workflow (`workflow_dispatch`,
+  `.github/workflows/instrumented-tests.yml`) or locally with
+  `gradle connectedDebugAndroidTest` against a running emulator/device.
 
 ## License
 

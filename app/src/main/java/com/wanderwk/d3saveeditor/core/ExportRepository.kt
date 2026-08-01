@@ -78,6 +78,8 @@ object ExportRepository {
                 itemObj.put("level", it.level)
                 itemObj.put("quantity", it.quantity)
                 itemObj.put("name", it.name)
+                itemObj.put("used_socket_count", it.usedSocketCount)
+                itemObj.put("socketed_gems", JSONArray(it.socketedGemNames))
                 itemsArr.put(itemObj)
             }
             heroObj.put("items", itemsArr)
@@ -95,6 +97,8 @@ object ExportRepository {
             itemObj.put("quality", it.quality)
             itemObj.put("quantity", it.quantity)
             itemObj.put("name", it.name)
+            itemObj.put("used_socket_count", it.usedSocketCount)
+            itemObj.put("socketed_gems", JSONArray(it.socketedGemNames))
             stashArr.put(itemObj)
         }
         root.put("stash", stashArr)

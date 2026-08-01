@@ -35,10 +35,6 @@ private val CLASS_NAMES = mapOf(
 
 class AppViewModel(app: Application) : AndroidViewModel(app) {
 
-    var licenseUnlocked by mutableStateOf(false); private set
-    var licenseFileInfo by mutableStateOf<String?>(null); private set
-    var licenseError by mutableStateOf<String?>(null); private set
-
     var saveInfo by mutableStateOf<SaveWorkspace.SaveInfo?>(null); private set
     var importError by mutableStateOf<String?>(null); private set
     var busy by mutableStateOf(false); private set
@@ -58,31 +54,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         saveInfo = SaveWorkspace.loadPersistedInfo(app)
         saveInfo?.let { refreshAll() }
         backups = SaveWorkspace.listBackups(app)
-    }
-
-    // ── License gate ────────────────────────────────────────────────────
-
-    fun onLicenseFileSelected(uri: Uri) {
-        viewModelScope.launch {
-            try {
-                val bytes = withContext(Dispatchers.IO) {
-                    getApplication<Application>().contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                }
-                if (bytes == null || bytes.isEmpty()) {
-                    licenseError = "Arquivo vazio ou inválido."
-                    licenseFileInfo = null
-                } else {
-                    licenseError = null
-                    licenseFileInfo = "${bytes.size} bytes — assinatura OK"
-                }
-            } catch (e: Exception) {
-                licenseError = "Erro ao ler arquivo: ${e.message}"
-            }
-        }
-    }
-
-    fun unlock() {
-        if (licenseFileInfo != null) licenseUnlocked = true
     }
 
     // ── Save import / state refresh ─────────────────────────────────────
@@ -200,14 +171,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun replaceHeroItemGbid(hero: HeroUi, itemIndex: Int, newGbid: Long, onDone: (Boolean) -> Unit) {
-        viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) { ItemRepository.replaceHeroItemGbid(hero.file, itemIndex, newGbid) }
-            maybeAutoBackup()
-            onDone(ok)
-        }
-    }
-
     fun removeHeroItem(hero: HeroUi, itemIndex: Int, onDone: (Boolean) -> Unit) {
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) { ItemRepository.removeHeroItem(hero.file, itemIndex) }
@@ -219,6 +182,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     fun updateHeroItemQuantity(hero: HeroUi, itemIndex: Int, newQuantity: Long, onDone: (Boolean) -> Unit) {
         viewModelScope.launch {
             val ok = withContext(Dispatchers.IO) { ItemRepository.updateHeroItemStackSize(hero.file, itemIndex, newQuantity) }
+            maybeAutoBackup()
+            onDone(ok)
+        }
+    }
+
+    fun addGemToItem(hero: HeroUi, itemIndex: Int, gemGbid: Long, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { ItemRepository.addGemToItem(hero.file, itemIndex, gemGbid) }
+            maybeAutoBackup()
+            onDone(ok)
+        }
+    }
+
+    fun removeGemFromItem(hero: HeroUi, itemIndex: Int, gemSlot: Int, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { ItemRepository.removeGemFromItem(hero.file, itemIndex, gemSlot) }
             maybeAutoBackup()
             onDone(ok)
         }

@@ -61,6 +61,12 @@ fun HomeScreen(viewModel: AppViewModel) {
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
+        Text(
+            "Ferramenta de uso pessoal para edição de saves offline do Diablo III. Não afiliado à Blizzard Entertainment.",
+            color = TextFaint,
+            fontSize = 11.sp,
+        )
+
         val info = viewModel.saveInfo
         if (info != null) {
             Column(

@@ -36,9 +36,23 @@ import kotlin.random.Random
  *                       items (gems, materials)
  *   field 10 (varint)   item_quality_level -- SINT32 (zigzag-encoded), the
  *                       real rarity/quality tier
+ *   field 13 (message, repeated) contents -- EmbeddedGenerator{field1=id
+ *                       (ItemId), field2=generator (nested Generator, same
+ *                       layout as this one)} -- this is where socketed
+ *                       gems really live. Confirmed against the real
+ *                       `Items.proto` (D3.Items.Generator.contents /
+ *                       D3.Items.EmbeddedGenerator, same source that fixed
+ *                       the gbid bug above). Replaces the old "apply gem =
+ *                       overwrite the item's own gbid" hack.
  *   field 16 (varint)   legendary_item_level -- only meaningful for
  *                       legendaries; used here as the item's displayed
  *                       "level" (0 for everything else)
+ *
+ * `SavedItem.used_socket_count` (field 7, varint) tracks how many sockets
+ * are currently filled. The item's *total* socket capacity is not stored
+ * in the save at all (it's static game-balance data looked up by gbid at
+ * runtime, same as damage/armor/etc.) -- our catalog doesn't have it
+ * either, so we don't enforce a socket cap here.
  */
 object ItemRepository {
 
@@ -50,10 +64,13 @@ object ItemRepository {
         val level: Int,
         val quantity: Long,
         val uidSerial: Long,
+        val usedSocketCount: Int = 0,
+        val socketedGbids: List<Long> = emptyList(),
     ) {
         val name: String get() = ItemCatalog.lookup(gbid)
         val rarity: String get() = qualityToRarity(quality)
         val slotLabel: String get() = ItemRepository.slotLabel(slot)
+        val socketedGemNames: List<String> get() = socketedGbids.map { ItemCatalog.lookup(it) }
     }
 
     private val EQUIP_SLOTS = mapOf(
@@ -110,10 +127,12 @@ object ItemRepository {
         var slot = -1
         var rawGenerator: ByteArray? = null
         var uidSerial = 0L
+        var usedSocketCount = 0
 
         for (f in parseFields(entryBytes)) {
             when {
                 f.fieldNumber == 6 && f.wireType == 0 -> slot = f.longValue().toInt()
+                f.fieldNumber == 7 && f.wireType == 0 -> usedSocketCount = f.longValue().toInt()
                 f.fieldNumber == 8 && f.wireType == 2 -> rawGenerator = f.bytesValue()
                 f.fieldNumber == 1 && f.wireType == 2 -> {
                     uidSerial = parseFields(f.bytesValue())
@@ -128,6 +147,7 @@ object ItemRepository {
         var quality = 0
         var legendaryLevel = 0
         var stackSize = 0L
+        val socketedGbids = ArrayList<Long>()
         for (f in parseFields(generator)) {
             when {
                 f.fieldNumber == 2 && f.wireType == 2 -> { // gb_handle
@@ -140,9 +160,20 @@ object ItemRepository {
                 f.fieldNumber == 8 && f.wireType == 0 -> stackSize = f.longValue()
                 f.fieldNumber == 10 && f.wireType == 0 -> quality = zigzagDecode32(f.longValue()).toInt()
                 f.fieldNumber == 16 && f.wireType == 0 -> legendaryLevel = f.longValue().toInt()
+                f.fieldNumber == 13 && f.wireType == 2 -> { // EmbeddedGenerator = socketed gem
+                    extractEmbeddedGbid(f.bytesValue())?.let { socketedGbids.add(it) }
+                }
             }
         }
-        return D3Item(idx, slot, gbid, quality, legendaryLevel, stackSize, uidSerial)
+        return D3Item(idx, slot, gbid, quality, legendaryLevel, stackSize, uidSerial, usedSocketCount, socketedGbids)
+    }
+
+    /** Reads the gbid out of an EmbeddedGenerator{id, generator{...gb_handle{...gbid}}} blob. */
+    private fun extractEmbeddedGbid(embeddedBytes: ByteArray): Long? {
+        val nestedGenerator = parseFields(embeddedBytes).firstOrNull { it.fieldNumber == 2 && it.wireType == 2 } ?: return null
+        val handle = parseFields(nestedGenerator.bytesValue()).firstOrNull { it.fieldNumber == 2 && it.wireType == 2 } ?: return null
+        val gbidField = parseFields(handle.bytesValue()).firstOrNull { it.fieldNumber == 2 && it.wireType == 5 } ?: return null
+        return leFixed32ToLong(gbidField.bytesValue())
     }
 
     // ── Hero items ───────────────────────────────────────────────────────
@@ -271,6 +302,70 @@ object ItemRepository {
         return false
     }
 
+    /** Adds a gem (as an EmbeddedGenerator) into an item's Generator.contents (field 13) and bumps used_socket_count. */
+    fun addGemToItem(heroFile: File, itemIndex: Int, gemGbid: Long): Boolean {
+        val handle = readHeroItemsHandle(heroFile)
+        if (handle.field6Index < 0) return false
+
+        var count = 0
+        for (i in handle.itemFields.indices) {
+            val f = handle.itemFields[i]
+            if (f.fieldNumber != 1 || f.wireType != 2) continue
+            if (count == itemIndex) {
+                val entryFields = parseFields(f.bytesValue())
+                withGeneratorFields(entryFields) { generatorFields ->
+                    generatorFields.add(PField(13, 2, makeEmbeddedGenerator(gemGbid)))
+                }
+                val socketIdx = entryFields.indexOfFirst { it.fieldNumber == 7 && it.wireType == 0 }
+                val current = if (socketIdx >= 0) entryFields[socketIdx].longValue() else 0L
+                if (socketIdx >= 0) {
+                    entryFields[socketIdx] = PField(7, 0, current + 1)
+                } else {
+                    entryFields.add(PField(7, 0, 1L))
+                }
+                handle.itemFields[i] = PField(1, 2, serializeFields(entryFields))
+                return writeHeroItemFields(heroFile, handle)
+            }
+            count++
+        }
+        return false
+    }
+
+    /** Removes the [gemSlot]-th socketed gem (0-based, in encounter order) from an item and decrements used_socket_count. */
+    fun removeGemFromItem(heroFile: File, itemIndex: Int, gemSlot: Int): Boolean {
+        val handle = readHeroItemsHandle(heroFile)
+        if (handle.field6Index < 0) return false
+
+        var count = 0
+        for (i in handle.itemFields.indices) {
+            val f = handle.itemFields[i]
+            if (f.fieldNumber != 1 || f.wireType != 2) continue
+            if (count == itemIndex) {
+                val entryFields = parseFields(f.bytesValue())
+                var removed = false
+                withGeneratorFields(entryFields) { generatorFields ->
+                    val embeddedIndices = generatorFields.withIndex()
+                        .filter { it.value.fieldNumber == 13 && it.value.wireType == 2 }
+                        .map { it.index }
+                    if (gemSlot in embeddedIndices.indices) {
+                        generatorFields.removeAt(embeddedIndices[gemSlot])
+                        removed = true
+                    }
+                }
+                if (!removed) return false
+                val socketIdx = entryFields.indexOfFirst { it.fieldNumber == 7 && it.wireType == 0 }
+                if (socketIdx >= 0) {
+                    val current = entryFields[socketIdx].longValue()
+                    entryFields[socketIdx] = PField(7, 0, (current - 1).coerceAtLeast(0))
+                }
+                handle.itemFields[i] = PField(1, 2, serializeFields(entryFields))
+                return writeHeroItemFields(heroFile, handle)
+            }
+            count++
+        }
+        return false
+    }
+
     fun removeHeroItem(heroFile: File, itemIndex: Int): Boolean {
         val handle = readHeroItemsHandle(heroFile)
         if (handle.field6Index < 0) return false
@@ -374,6 +469,14 @@ object ItemRepository {
         val seed = Random.nextInt(1, Int.MAX_VALUE)
         val handle = serializeFields(listOf(PField(1, 0, 4L), PField(2, 5, longToLeFixed32(gbid))))
         return serializeFields(listOf(PField(1, 0, seed.toLong()), PField(2, 2, handle)))
+    }
+
+    /** Builds an EmbeddedGenerator{id, generator} blob for a gem being socketed into another item. */
+    private fun makeEmbeddedGenerator(gemGbid: Long): ByteArray {
+        val serial = Random.nextInt(1, Int.MAX_VALUE).toLong()
+        val id = makeUidBytes(serial)
+        val generator = makeGenerator(gemGbid)
+        return serializeFields(listOf(PField(1, 2, id), PField(2, 2, generator)))
     }
 
     private fun makeItemEntry(serial: Long, slot: Int, gbid: Long): ByteArray {

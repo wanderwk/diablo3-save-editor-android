@@ -76,4 +76,50 @@ class ItemRepositoryTest {
         assertEquals(expectedStack, item.quantity)
         assertEquals(expectedSlot, item.slot)
     }
+
+    /**
+     * Regression test for gem sockets. Real layout (same Items.proto source
+     * as above): a socketed gem is an EmbeddedGenerator (Generator field 13,
+     * repeated) -- {field1=id, field2=nested Generator{...gb_handle{gbid}}}
+     * -- NOT a swap of the host item's own gbid (the old "apply gem" hack).
+     * SavedItem.used_socket_count (entry field 7) tracks how many are filled.
+     */
+    @Test
+    fun `addGemToItem and removeGemFromItem manage real Generator contents sockets`() {
+        val hostGbid = 0x11223344L
+        val gemGbid = 0x55667788L
+
+        val handle = serializeFields(listOf(PField(1, 0, 4L), PField(2, 5, leFixed32(hostGbid))))
+        val generator = serializeFields(listOf(PField(1, 0, 111L), PField(2, 2, handle), PField(8, 0, 1L)))
+        val uid = serializeFields(listOf(PField(1, 0, 1L), PField(2, 0, 7L)))
+        val entry = serializeFields(
+            listOf(PField(1, 2, uid), PField(5, 0, 544L), PField(6, 0, 14L), PField(8, 2, generator))
+        )
+        val itemsList = serializeFields(listOf(PField(1, 2, entry)))
+        val heroBytes = serializeFields(listOf(PField(6, 2, itemsList)))
+
+        val heroFile = File.createTempFile("regression_hero_sockets", ".dat")
+        heroFile.deleteOnExit()
+        heroFile.writeBytes(SaveCipher.encrypt(heroBytes))
+
+        // No sockets initially.
+        var item = ItemRepository.readHeroItems(heroFile)[0]
+        assertEquals(0, item.usedSocketCount)
+        assertEquals(emptyList<Long>(), item.socketedGbids)
+        assertEquals(hostGbid, item.gbid) // host item's own gbid must be untouched
+
+        // Add a gem: host gbid stays the same, a socketed gem shows up.
+        assertEquals(true, ItemRepository.addGemToItem(heroFile, 0, gemGbid))
+        item = ItemRepository.readHeroItems(heroFile)[0]
+        assertEquals(hostGbid, item.gbid)
+        assertEquals(1, item.usedSocketCount)
+        assertEquals(listOf(gemGbid), item.socketedGbids)
+
+        // Remove it: back to zero sockets, host gbid still untouched.
+        assertEquals(true, ItemRepository.removeGemFromItem(heroFile, 0, 0))
+        item = ItemRepository.readHeroItems(heroFile)[0]
+        assertEquals(hostGbid, item.gbid)
+        assertEquals(0, item.usedSocketCount)
+        assertEquals(emptyList<Long>(), item.socketedGbids)
+    }
 }

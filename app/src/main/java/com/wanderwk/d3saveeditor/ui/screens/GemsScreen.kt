@@ -58,11 +58,13 @@ fun GemsScreen(viewModel: AppViewModel) {
     var refreshTick by remember { mutableStateOf(0) }
     val items = remember(hero, refreshTick) { viewModel.heroItems(hero) }
     var selected by remember { mutableStateOf<ItemRepository.D3Item?>(null) }
+    // Re-resolve the selected item after every edit so the sheet reflects the latest socketed gems.
+    val selectedFresh = selected?.let { sel -> items.firstOrNull { it.index == sel.index } }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(
-            "Toque em um item para aplicar uma gema (substitui o item pela gema escolhida — " +
-                "este formato de save não expõe soquetes individuais separadamente).",
+            "Toque em um item para gerenciar as gemas socketadas nele (soquete real do item, via " +
+                "Generator.contents — não substitui mais o item).",
             color = TextFaint,
             fontSize = 11.sp,
         )
@@ -73,12 +75,15 @@ fun GemsScreen(viewModel: AppViewModel) {
         }
     }
 
-    selected?.let { item ->
-        GemApplySheet(
+    selectedFresh?.let { item ->
+        GemSocketSheet(
             item = item,
             onDismiss = { selected = null },
-            onApply = { gbid ->
-                viewModel.replaceHeroItemGbid(hero, item.index, gbid) { refreshTick++; selected = null }
+            onAdd = { gbid ->
+                viewModel.addGemToItem(hero, item.index, gbid) { refreshTick++ }
+            },
+            onRemove = { slot ->
+                viewModel.removeGemFromItem(hero, item.index, slot) { refreshTick++ }
             },
         )
     }
@@ -97,22 +102,37 @@ private fun GemItemRow(item: ItemRepository.D3Item, onClick: () -> Unit) {
         Text(item.name, color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text("${item.rarity} · ${item.slotLabel}", color = rarityColor(item.rarity), fontSize = 11.sp)
         Spacer(Modifier.height(10.dp))
-        val gemCategory = GEM_TYPES.firstOrNull { it.equals(ItemCatalog.all().firstOrNull { e -> e.gbid == item.gbid }?.category, ignoreCase = true) }
-        Box(
-            Modifier
-                .size(58.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .background(if (gemCategory != null) gemColor(gemCategory).copy(alpha = 0.25f) else SurfaceContainerHigh1),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(if (gemCategory != null) "●" else "Vazio", color = if (gemCategory != null) gemColor(gemCategory) else TextFaint, fontSize = if (gemCategory != null) 20.sp else 9.sp)
+        if (item.socketedGbids.isEmpty()) {
+            Text("Sem gemas socketadas", color = TextFaint, fontSize = 11.sp)
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                item.socketedGemNames.forEach { gemName ->
+                    val cat = GEM_TYPES.firstOrNull { gemName.contains(it, ignoreCase = true) }
+                    Box(
+                        Modifier
+                            .size(28.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(if (cat != null) gemColor(cat).copy(alpha = 0.3f) else SurfaceContainerHigh1),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("●", color = if (cat != null) gemColor(cat) else TextFaint, fontSize = 14.sp)
+                    }
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text("${item.socketedGbids.size} gema(s) socketada(s)", color = TextMuted, fontSize = 10.sp)
         }
     }
 }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun GemApplySheet(item: ItemRepository.D3Item, onDismiss: () -> Unit, onApply: (Long) -> Unit) {
+private fun GemSocketSheet(
+    item: ItemRepository.D3Item,
+    onDismiss: () -> Unit,
+    onAdd: (Long) -> Unit,
+    onRemove: (Int) -> Unit,
+) {
     var type by remember { mutableStateOf(GEM_TYPES[0]) }
     var chosen by remember { mutableStateOf<ItemCatalog.Entry?>(null) }
 
@@ -120,8 +140,37 @@ private fun GemApplySheet(item: ItemRepository.D3Item, onDismiss: () -> Unit, on
 
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = SurfaceContainerHigh1) {
         Column(Modifier.fillMaxWidth().padding(20.dp)) {
-            Text("Aplicar gema em ${item.name}", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-            Spacer(Modifier.height(14.dp))
+            Text("Gemas em ${item.name}", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+            Spacer(Modifier.height(10.dp))
+
+            if (item.socketedGemNames.isEmpty()) {
+                Text("Nenhuma gema socketada ainda.", color = TextFaint, fontSize = 12.sp)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    item.socketedGemNames.forEachIndexed { slot, name ->
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(SurfaceContainer)
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(name, color = TextPrimary, fontSize = 12.sp)
+                            Text(
+                                "Remover",
+                                color = com.wanderwk.d3saveeditor.ui.theme.ErrorOrange,
+                                fontSize = 11.sp,
+                                modifier = Modifier.clickable { onRemove(slot) },
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text("Adicionar gema", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 GEM_TYPES.forEach { t ->
                     val active = t == type
@@ -156,9 +205,9 @@ private fun GemApplySheet(item: ItemRepository.D3Item, onDismiss: () -> Unit, on
 
             Spacer(Modifier.height(16.dp))
             PillButton(
-                text = "Aplicar",
+                text = "Adicionar gema",
                 modifier = Modifier.fillMaxWidth(),
-                onClick = { chosen?.let { onApply(it.gbid) } },
+                onClick = { chosen?.let { onAdd(it.gbid); chosen = null } },
             )
             Spacer(Modifier.height(12.dp))
         }
