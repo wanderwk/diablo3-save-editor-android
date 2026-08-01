@@ -76,6 +76,7 @@ object ExportRepository {
                 itemObj.put("gbid_hex", "0x%08X".format(it.gbid))
                 itemObj.put("quality", it.quality)
                 itemObj.put("level", it.level)
+                itemObj.put("quantity", it.quantity)
                 itemObj.put("name", it.name)
                 itemsArr.put(itemObj)
             }
@@ -92,6 +93,7 @@ object ExportRepository {
             itemObj.put("gbid", it.gbid)
             itemObj.put("gbid_hex", "0x%08X".format(it.gbid))
             itemObj.put("quality", it.quality)
+            itemObj.put("quantity", it.quantity)
             itemObj.put("name", it.name)
             stashArr.put(itemObj)
         }

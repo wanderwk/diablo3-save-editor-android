@@ -6,18 +6,39 @@ import kotlin.random.Random
 /**
  * Hero inventory/equipment (hero.dat field 6) and shared stash
  * (account.dat field 21 -> field 2) item read/write.
- * Ported from item_editor.py.
  *
- * Item entry layout:
- *   field 1 (message) uid: field 1 = player id (const 1), field 2 = serial
- *   field 4 (varint)  const 0
- *   field 5 (varint)  const 544 (world/location constant)
- *   field 6 (varint)  slot
- *   field 7 (varint)  const 0
- *   field 8 (message) blob: field 1 = gbid (varint),
- *                           field 2 (message) sub: field 1 = quality (varint)
- *                                                   field 4 = quality (fixed32, alt encoding)
- *                                                   field 9 = level (varint)
+ * Field layout confirmed against the real `Items.proto` (compiled Python
+ * descriptors from https://github.com/GoobyCorp/D3Edit, `Items_pb2.py`)
+ * cross-checked byte-for-byte against a real Switch save sample -- 24/24
+ * items resolved to correct catalog names once this was fixed (see
+ * project history: the original guessed layout below was wrong, which is
+ * why every item/gem showed as "Item Desconhecido").
+ *
+ * `SavedItem` (one entry inside hero.dat field 6 / stash field 21->2):
+ *   field 1 (message) id: ItemId{id_high, id_low} (both uint64 varint)
+ *   field 5 (varint)  item_slot (equip-slot enum -- semantics not fully
+ *                      mapped yet, not used here)
+ *   field 6 (varint)  square_index -- inventory GRID position; this is
+ *                      what we use as "slot" for bucketing into
+ *                      equipped/inventory/stash and finding free cells
+ *   field 8 (message) generator: see Generator below
+ *
+ * `Generator` (SavedItem field 8 -- previously wrongly treated as
+ * "field1=gbid, field2={field1=quality,field9=level}"):
+ *   field 1  (varint)   seed (per-instance random seed, NOT the gbid --
+ *                       this is why the old code, which read this as
+ *                       gbid, never matched anything in the catalog)
+ *   field 2  (message)  gb_handle: Handle{field1=game_balance_type (varint,
+ *                       always 4 for items in real saves), field2=gbid
+ *                       (SFIXED32, 4 raw bytes little-endian, signed --
+ *                       mask to unsigned 32-bit to match catalog gbids)}
+ *   field 8  (varint)   stack_size -- the real "quantity" for stackable
+ *                       items (gems, materials)
+ *   field 10 (varint)   item_quality_level -- SINT32 (zigzag-encoded), the
+ *                       real rarity/quality tier
+ *   field 16 (varint)   legendary_item_level -- only meaningful for
+ *                       legendaries; used here as the item's displayed
+ *                       "level" (0 for everything else)
  */
 object ItemRepository {
 
@@ -27,6 +48,7 @@ object ItemRepository {
         val gbid: Long,
         val quality: Int,
         val level: Int,
+        val quantity: Long,
         val uidSerial: Long,
     ) {
         val name: String get() = ItemCatalog.lookup(gbid)
@@ -61,17 +83,38 @@ object ItemRepository {
         else -> "normal"
     }
 
+    private fun zigzagDecode32(value: Long): Long {
+        val n = value.toInt()
+        return ((n ushr 1) xor -(n and 1)).toLong()
+    }
+
+    private fun leFixed32ToLong(b: ByteArray): Long {
+        val raw = (b[0].toInt() and 0xFF) or ((b[1].toInt() and 0xFF) shl 8) or
+            ((b[2].toInt() and 0xFF) shl 16) or ((b[3].toInt() and 0xFF) shl 24)
+        return raw.toLong() and 0xFFFFFFFFL
+    }
+
+    private fun longToLeFixed32(value: Long): ByteArray {
+        val v = value.toInt()
+        return byteArrayOf(
+            (v and 0xFF).toByte(),
+            ((v ushr 8) and 0xFF).toByte(),
+            ((v ushr 16) and 0xFF).toByte(),
+            ((v ushr 24) and 0xFF).toByte(),
+        )
+    }
+
     // ── Parsing a single item entry ─────────────────────────────────────
 
     private fun parseItemEntry(entryBytes: ByteArray, idx: Int): D3Item? {
         var slot = -1
-        var rawBlob: ByteArray? = null
+        var rawGenerator: ByteArray? = null
         var uidSerial = 0L
 
         for (f in parseFields(entryBytes)) {
             when {
                 f.fieldNumber == 6 && f.wireType == 0 -> slot = f.longValue().toInt()
-                f.fieldNumber == 8 && f.wireType == 2 -> rawBlob = f.bytesValue()
+                f.fieldNumber == 8 && f.wireType == 2 -> rawGenerator = f.bytesValue()
                 f.fieldNumber == 1 && f.wireType == 2 -> {
                     uidSerial = parseFields(f.bytesValue())
                         .firstOrNull { it.fieldNumber == 2 && it.wireType == 0 }
@@ -79,30 +122,27 @@ object ItemRepository {
                 }
             }
         }
-        val blob = rawBlob ?: return null
+        val generator = rawGenerator ?: return null
 
         var gbid = 0L
         var quality = 0
-        var level = 0
-        for (f in parseFields(blob)) {
+        var legendaryLevel = 0
+        var stackSize = 0L
+        for (f in parseFields(generator)) {
             when {
-                f.fieldNumber == 1 && f.wireType == 0 -> gbid = f.longValue() and 0xFFFFFFFFL
-                f.fieldNumber == 2 && f.wireType == 2 -> {
-                    for (sub in parseFields(f.bytesValue())) {
-                        when {
-                            sub.fieldNumber == 1 && sub.wireType == 0 -> quality = sub.longValue().toInt()
-                            sub.fieldNumber == 4 && sub.wireType == 5 -> {
-                                val b = sub.bytesValue()
-                                quality = (b[0].toInt() and 0xFF) or ((b[1].toInt() and 0xFF) shl 8) or
-                                    ((b[2].toInt() and 0xFF) shl 16) or ((b[3].toInt() and 0xFF) shl 24)
-                            }
-                            sub.fieldNumber == 9 && sub.wireType == 0 -> level = sub.longValue().toInt()
+                f.fieldNumber == 2 && f.wireType == 2 -> { // gb_handle
+                    for (h in parseFields(f.bytesValue())) {
+                        if (h.fieldNumber == 2 && h.wireType == 5) {
+                            gbid = leFixed32ToLong(h.bytesValue())
                         }
                     }
                 }
+                f.fieldNumber == 8 && f.wireType == 0 -> stackSize = f.longValue()
+                f.fieldNumber == 10 && f.wireType == 0 -> quality = zigzagDecode32(f.longValue()).toInt()
+                f.fieldNumber == 16 && f.wireType == 0 -> legendaryLevel = f.longValue().toInt()
             }
         }
-        return D3Item(idx, slot, gbid, quality, level, uidSerial)
+        return D3Item(idx, slot, gbid, quality, legendaryLevel, stackSize, uidSerial)
     }
 
     // ── Hero items ───────────────────────────────────────────────────────
@@ -160,6 +200,19 @@ object ItemRepository {
         return if (writeHeroItemFields(heroFile, handle)) added else 0
     }
 
+    /** Finds the Generator (field 8) and gb_handle (field 2) sub-fields of an item entry, for in-place edits. */
+    private fun withGeneratorFields(
+        entryFields: MutableList<PField>,
+        edit: (generatorFields: MutableList<PField>) -> Unit,
+    ): Boolean {
+        val genIdx = entryFields.indexOfFirst { it.fieldNumber == 8 && it.wireType == 2 }
+        if (genIdx < 0) return false
+        val generatorFields = parseFields(entryFields[genIdx].bytesValue())
+        edit(generatorFields)
+        entryFields[genIdx] = PField(8, 2, serializeFields(generatorFields))
+        return true
+    }
+
     fun replaceHeroItemGbid(heroFile: File, itemIndex: Int, newGbid: Long): Boolean {
         val handle = readHeroItemsHandle(heroFile)
         if (handle.field6Index < 0) return false
@@ -170,13 +223,17 @@ object ItemRepository {
             if (f.fieldNumber != 1 || f.wireType != 2) continue
             if (count == itemIndex) {
                 val entryFields = parseFields(f.bytesValue())
-                val blobIdx = entryFields.indexOfFirst { it.fieldNumber == 8 && it.wireType == 2 }
-                if (blobIdx >= 0) {
-                    val blobFields = parseFields(entryFields[blobIdx].bytesValue())
-                    val gbidIdx = blobFields.indexOfFirst { it.fieldNumber == 1 && it.wireType == 0 }
-                    if (gbidIdx >= 0) {
-                        blobFields[gbidIdx] = PField(1, 0, newGbid and 0xFFFFFFFFL)
-                        entryFields[blobIdx] = PField(8, 2, serializeFields(blobFields))
+                withGeneratorFields(entryFields) { generatorFields ->
+                    val handleIdx = generatorFields.indexOfFirst { it.fieldNumber == 2 && it.wireType == 2 }
+                    if (handleIdx >= 0) {
+                        val handleFields = parseFields(generatorFields[handleIdx].bytesValue())
+                        val gbidIdx = handleFields.indexOfFirst { it.fieldNumber == 2 && it.wireType == 5 }
+                        if (gbidIdx >= 0) {
+                            handleFields[gbidIdx] = PField(2, 5, longToLeFixed32(newGbid))
+                        } else {
+                            handleFields.add(PField(2, 5, longToLeFixed32(newGbid)))
+                        }
+                        generatorFields[handleIdx] = PField(2, 2, serializeFields(handleFields))
                     }
                 }
                 handle.itemFields[i] = PField(1, 2, serializeFields(entryFields))
@@ -187,14 +244,8 @@ object ItemRepository {
         return false
     }
 
-    /**
-     * Edits an existing item's level (blob field 2 -> field 9). No real
-     * "stack count" field was reverse-engineered for this save format (the
-     * reference Python tool doesn't have one either) -- adding N copies of
-     * an item creates N separate slot entries (see [addItemsToHero]); this
-     * only edits the item's own level field.
-     */
-    fun updateHeroItemLevel(heroFile: File, itemIndex: Int, newLevel: Int): Boolean {
+    /** Edits an existing item's stack_size (Generator field 8) -- the real "quantity" for stackable items. */
+    fun updateHeroItemStackSize(heroFile: File, itemIndex: Int, newQuantity: Long): Boolean {
         val handle = readHeroItemsHandle(heroFile)
         if (handle.field6Index < 0) return false
 
@@ -204,20 +255,12 @@ object ItemRepository {
             if (f.fieldNumber != 1 || f.wireType != 2) continue
             if (count == itemIndex) {
                 val entryFields = parseFields(f.bytesValue())
-                val blobIdx = entryFields.indexOfFirst { it.fieldNumber == 8 && it.wireType == 2 }
-                if (blobIdx >= 0) {
-                    val blobFields = parseFields(entryFields[blobIdx].bytesValue())
-                    val subIdx = blobFields.indexOfFirst { it.fieldNumber == 2 && it.wireType == 2 }
-                    if (subIdx >= 0) {
-                        val subFields = parseFields(blobFields[subIdx].bytesValue())
-                        val levelIdx = subFields.indexOfFirst { it.fieldNumber == 9 && it.wireType == 0 }
-                        if (levelIdx >= 0) {
-                            subFields[levelIdx] = PField(9, 0, newLevel.toLong())
-                        } else {
-                            subFields.add(PField(9, 0, newLevel.toLong()))
-                        }
-                        blobFields[subIdx] = PField(2, 2, serializeFields(subFields))
-                        entryFields[blobIdx] = PField(8, 2, serializeFields(blobFields))
+                withGeneratorFields(entryFields) { generatorFields ->
+                    val stackIdx = generatorFields.indexOfFirst { it.fieldNumber == 8 && it.wireType == 0 }
+                    if (stackIdx >= 0) {
+                        generatorFields[stackIdx] = PField(8, 0, newQuantity)
+                    } else {
+                        generatorFields.add(PField(8, 0, newQuantity))
                     }
                 }
                 handle.itemFields[i] = PField(1, 2, serializeFields(entryFields))
@@ -318,24 +361,24 @@ object ItemRepository {
     private fun maxUidSerial(items: List<D3Item>): Long =
         items.map { it.uidSerial }.filter { it in 1 until (1L shl 32) }.maxOrNull() ?: 2_000_000_000L
 
+    /** SavedItem.id = ItemId{id_high, id_low}; id_low doubles as our per-item unique serial. */
     private fun makeUidBytes(serial: Long): ByteArray =
         serializeFields(listOf(PField(1, 0, 1L), PField(2, 0, serial)))
 
-    private fun makeItemBlob(gbid: Long): ByteArray {
+    /**
+     * Builds a minimal but valid Generator message for a brand-new item:
+     * a random seed, and a gb_handle pointing at [gbid] (game_balance_type
+     * 4 is what every real item in a sampled save used).
+     */
+    private fun makeGenerator(gbid: Long): ByteArray {
         val seed = Random.nextInt(1, Int.MAX_VALUE)
-        val seedBytes = byteArrayOf(
-            (seed and 0xFF).toByte(),
-            ((seed ushr 8) and 0xFF).toByte(),
-            ((seed ushr 16) and 0xFF).toByte(),
-            ((seed ushr 24) and 0xFF).toByte(),
-        )
-        val sub = serializeFields(listOf(PField(1, 0, 0L), PField(2, 5, seedBytes)))
-        return serializeFields(listOf(PField(1, 0, gbid), PField(2, 2, sub)))
+        val handle = serializeFields(listOf(PField(1, 0, 4L), PField(2, 5, longToLeFixed32(gbid))))
+        return serializeFields(listOf(PField(1, 0, seed.toLong()), PField(2, 2, handle)))
     }
 
     private fun makeItemEntry(serial: Long, slot: Int, gbid: Long): ByteArray {
         val uid = makeUidBytes(serial)
-        val blob = makeItemBlob(gbid)
+        val generator = makeGenerator(gbid)
         return serializeFields(
             listOf(
                 PField(1, 2, uid),
@@ -343,7 +386,7 @@ object ItemRepository {
                 PField(5, 0, 544L),
                 PField(6, 0, slot.toLong()),
                 PField(7, 0, 0L),
-                PField(8, 2, blob),
+                PField(8, 2, generator),
             )
         )
     }

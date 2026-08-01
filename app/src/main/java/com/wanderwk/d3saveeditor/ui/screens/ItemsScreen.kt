@@ -165,6 +165,11 @@ fun ItemsScreen(viewModel: AppViewModel) {
                     viewModel.removeHeroItem(h, item.index) { refreshTick++; selectedItem = null }
                 }
             },
+            onQuantityChange = { newQty ->
+                hero?.let { h ->
+                    viewModel.updateHeroItemQuantity(h, item.index, newQty) { refreshTick++ }
+                }
+            },
         )
     }
 
@@ -211,12 +216,21 @@ private fun ItemCard(item: ItemRepository.D3Item, onClick: () -> Unit) {
         Text(item.name, color = TextPrimary, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Spacer(Modifier.height(4.dp))
         Text("${item.rarity} · ${item.slotLabel}", color = color, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (item.quantity > 1) {
+            Spacer(Modifier.height(4.dp))
+            com.wanderwk.d3saveeditor.ui.components.SmallPill("x${item.quantity}", bg = PrimaryContainer, fg = PrimaryAccent)
+        }
     }
 }
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun ItemDetailSheet(item: ItemRepository.D3Item, onDismiss: () -> Unit, onRemove: () -> Unit) {
+private fun ItemDetailSheet(
+    item: ItemRepository.D3Item,
+    onDismiss: () -> Unit,
+    onRemove: () -> Unit,
+    onQuantityChange: ((Long) -> Unit)? = null,
+) {
     ModalBottomSheet(onDismissRequest = onDismiss, containerColor = SurfaceContainerHigh1) {
         Column(Modifier.fillMaxWidth().padding(20.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -228,6 +242,22 @@ private fun ItemDetailSheet(item: ItemRepository.D3Item, onDismiss: () -> Unit, 
             }
             Spacer(Modifier.height(16.dp))
             Text("GBID: 0x%08X".format(item.gbid), color = TextFaint, fontSize = 11.sp)
+
+            if (item.quantity > 0 && onQuantityChange != null) {
+                Spacer(Modifier.height(16.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Quantidade", color = TextMuted, fontSize = 13.sp)
+                    Spacer(Modifier.weight(1f))
+                    com.wanderwk.d3saveeditor.ui.components.SmallPill("−", bg = ChipDark1, fg = TextPrimary, onClick = {
+                        if (item.quantity > 1) onQuantityChange(item.quantity - 1)
+                    })
+                    Text(item.quantity.toString(), color = TextPrimary, fontSize = 14.sp)
+                    com.wanderwk.d3saveeditor.ui.components.SmallPill("+", bg = ChipDark1, fg = TextPrimary, onClick = {
+                        onQuantityChange((item.quantity + 1).coerceAtMost(9999L))
+                    })
+                }
+            }
+
             Spacer(Modifier.height(16.dp))
             PillButton(text = "Remover item", modifier = Modifier.fillMaxWidth(), bg = ChipDark1, fg = com.wanderwk.d3saveeditor.ui.theme.ErrorOrange, onClick = onRemove)
             Spacer(Modifier.height(12.dp))

@@ -216,6 +216,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun updateHeroItemQuantity(hero: HeroUi, itemIndex: Int, newQuantity: Long, onDone: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { ItemRepository.updateHeroItemStackSize(hero.file, itemIndex, newQuantity) }
+            maybeAutoBackup()
+            onDone(ok)
+        }
+    }
+
     // ── Export ───────────────────────────────────────────────────────────
 
     fun generateExportPreview() {
