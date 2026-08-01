@@ -1,3 +1,5 @@
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -36,7 +38,7 @@ val expectedSigHashHex: String = run {
         if (certBytes.isEmpty()) {
             "0000000000000000"
         } else {
-            java.security.MessageDigest.getInstance("SHA-256")
+            MessageDigest.getInstance("SHA-256")
                 .digest(certBytes).take(8).joinToString("") { "%02x".format(it) }
         }
     } catch (e: Exception) {
