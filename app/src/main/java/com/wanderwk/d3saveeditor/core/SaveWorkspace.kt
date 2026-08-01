@@ -15,7 +15,7 @@ class SaveEditorException(message: String) : Exception(message)
 /**
  * Owns the on-device working copy of an imported save: extraction from a
  * user-picked .zip (Storage Access Framework), locating account.dat /
- * heroes/*.dat inside it, re-zipping for export, and simple timestamped
+ * heroes/&#42;.dat inside it, re-zipping for export, and simple timestamped
  * backups. Mirrors main.py's zip_member_map / write_structure_to_dir /
  * backup_source from the reference tool.
  */
