@@ -76,6 +76,32 @@ a JDK 17 + Android SDK (compileSdk 34) environment; there's no committed
 Gradle wrapper, so either open in Android Studio (which provisions Gradle
 itself) or install Gradle 8.7 and run `gradle assembleRelease`.
 
+## Release-build integrity check
+
+Release builds only (never debug) carry a two-layer check that the APK is
+still signed with the certificate it was actually built with, to raise the
+bar against casual repackaging/resigning:
+
+- **Native layer** (`app/src/main/cpp/storage_sync.cpp`, a small NDK/CMake
+  module): runs from `JNI_OnLoad` (fires automatically on
+  `System.loadLibrary`, no exported function to grep for), hashes the APK's
+  own signing certificate via JNI reflection, and on a confirmed mismatch
+  calls `kill(getpid(), SIGKILL)` directly — no exception, no tombstone.
+- **Java layer** (`util/CacheWarmup.kt`): a second, independent check via
+  the normal typed `PackageManager` API, fired a few seconds after startup
+  (not at the obvious boot moment), throwing a generic `RuntimeException`
+  on mismatch. Deliberately decoupled from the native layer in code path,
+  timing, and naming, so defeating one doesn't imply the other was too.
+
+Both layers compare against a SHA-256 hash of the actual debug-keystore
+signing certificate, computed once at Gradle configuration time
+(`app/build.gradle.kts`) and baked in via a C++ compiler define + a
+`BuildConfig` field — so it always matches whatever really signs that
+build, on any machine/CI runner. Both layers fail *open* (do nothing) on
+any unexpected JNI/PackageManager anomaly, and only act on a cleanly
+computed, confirmed mismatch — this is a personal-use tool, so a false
+positive bricking a legitimate install is worse than a missed edge case.
+
 ## Testing
 
 - **Unit tests** (`gradle testDebugUnitTest`) run on every CI build — plain

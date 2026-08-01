@@ -3,9 +3,51 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Computed once at Gradle configuration time and reused for BOTH the native
+// (C++ compiler define, app/src/main/cpp/storage_sync.cpp) and Java
+// (BuildConfig field, util/CacheWarmup.kt) signing-certificate checks below.
+// Deriving it from the *actual* debug keystore this machine/CI runner will
+// sign the release APK with (rather than a value precomputed once and
+// hardcoded) means it's always correct regardless of which keystore ends up
+// being used -- no risk of embedding a stale constant that doesn't match
+// the real signature and bricks a legitimate release build.
+val expectedSigHashHex: String = run {
+    val keystoreDir = File(System.getProperty("user.home"), ".android")
+    val keystoreFile = File(keystoreDir, "debug.keystore")
+    if (!keystoreFile.exists()) {
+        keystoreDir.mkdirs()
+        ProcessBuilder(
+            "keytool", "-genkeypair", "-v",
+            "-keystore", keystoreFile.absolutePath,
+            "-storepass", "android", "-keypass", "android",
+            "-alias", "androiddebugkey",
+            "-dname", "CN=Android Debug,O=Android,C=US",
+            "-keyalg", "RSA", "-keysize", "2048", "-validity", "10950",
+        ).redirectErrorStream(true).start().waitFor()
+    }
+    try {
+        val certProcess = ProcessBuilder(
+            "keytool", "-exportcert",
+            "-keystore", keystoreFile.absolutePath,
+            "-storepass", "android", "-alias", "androiddebugkey",
+        ).start()
+        val certBytes = certProcess.inputStream.readBytes()
+        certProcess.waitFor()
+        if (certBytes.isEmpty()) {
+            "0000000000000000"
+        } else {
+            java.security.MessageDigest.getInstance("SHA-256")
+                .digest(certBytes).take(8).joinToString("") { "%02x".format(it) }
+        }
+    } catch (e: Exception) {
+        "0000000000000000"
+    }
+}
+
 android {
     namespace = "com.wanderwk.d3saveeditor"
     compileSdk = 34
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.wanderwk.d3saveeditor"
@@ -14,6 +56,19 @@ android {
         versionCode = 1
         versionName = "1.0.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        externalNativeBuild {
+            cmake {
+                abiFilters += listOf("armeabi-v7a", "arm64-v8a")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -22,6 +77,20 @@ android {
             // Signed with the debug key so the APK can be installed directly
             // without needing a release keystore/secret in CI.
             signingConfig = signingConfigs.getByName("debug")
+            buildConfigField("String", "EXPECTED_SIG_HASH_HEX", "\"$expectedSigHashHex\"")
+            externalNativeBuild {
+                cmake {
+                    // Anti-tamper (signing-certificate) check is release-only -- see
+                    // storage_sync.cpp and util/CacheWarmup.kt. Debug builds compile
+                    // storage_sync.cpp as a no-op (ANTI_TAMPER_ENABLED undefined), so
+                    // local/CI debug builds are never affected by this.
+                    cppFlags += "-DANTI_TAMPER_ENABLED=1"
+                    cppFlags += "-DEXPECTED_SIG_HASH=0x${expectedSigHashHex}ULL"
+                }
+            }
+        }
+        debug {
+            buildConfigField("String", "EXPECTED_SIG_HASH_HEX", "\"0\"")
         }
     }
 
@@ -35,6 +104,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"
