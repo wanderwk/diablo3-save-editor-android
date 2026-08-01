@@ -132,9 +132,14 @@ fun ItemsScreen(viewModel: AppViewModel) {
         }
 
         Spacer(Modifier.height(8.dp))
+        val catalogSize = ItemCatalog.all().size
         Text(
-            "${heroItems.size} itens do herói · catálogo completo tem +9000",
-            color = TextFaint,
+            if (catalogSize > 0) {
+                "${heroItems.size} itens do herói · catálogo com $catalogSize itens"
+            } else {
+                "${heroItems.size} itens do herói · catálogo NÃO carregado (nomes aparecerão como Desconhecido)"
+            },
+            color = if (catalogSize > 0) TextFaint else com.wanderwk.d3saveeditor.ui.theme.ErrorOrange,
             fontSize = 11.sp,
         )
         Spacer(Modifier.height(8.dp))
