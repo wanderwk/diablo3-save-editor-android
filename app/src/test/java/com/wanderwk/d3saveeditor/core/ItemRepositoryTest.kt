@@ -57,7 +57,7 @@ class ItemRepositoryTest {
             listOf(
                 PField(1, 2, uid),
                 PField(5, 0, 544L),
-                PField(6, 0, expectedSlot.toLong()),
+                PField(6, 0, zigzagEncode(expectedSlot)),
                 PField(8, 2, generator),
             )
         )
@@ -121,5 +121,51 @@ class ItemRepositoryTest {
         assertEquals(hostGbid, item.gbid)
         assertEquals(0, item.usedSocketCount)
         assertEquals(emptyList<Long>(), item.socketedGbids)
+    }
+
+    /**
+     * Regression test for a real "save recognized as old/invalid by the game after
+     * editing" bug report (2026-08-08). Root cause: `SavedItem.square_index` (entry
+     * field 6) is SINT32 (zigzag-encoded) per the real `Items.proto`, same as
+     * `item_quality_level` above -- but `addItemsToHero`/`addItemsToStash` wrote the
+     * inventory position we pick (16, 18, 20, ...) as a *plain* varint. The real game
+     * (a real, schema-compiled protobuf parser) always zigzag-*decodes* that field
+     * regardless of how we wrote it, so our intended position 16 landed at real grid
+     * cell 8 instead -- risking a collision with an item that's actually there,
+     * something a strict save-integrity check could plausibly reject outright. Fixed
+     * by zigzag-encoding on write (and correspondingly decoding on read, so our own
+     * "used slots" bookkeeping stays consistent with what the game actually sees).
+     *
+     * This test verifies the fix using an independent, from-scratch varint/zigzag
+     * decode (not the code under test) to simulate what a real protobuf sint32 field
+     * would decode to -- so a regression that breaks the *encoding* can't hide by
+     * also breaking the *decoding* in a matching way.
+     */
+    @Test
+    fun `addItemsToHero writes square_index that a real sint32 parser decodes back to the intended slot`() {
+        fun realZigzagDecode(v: Long): Long {
+            val n = v.toInt()
+            return ((n ushr 1) xor -(n and 1)).toLong()
+        }
+
+        val heroBytes = serializeFields(listOf(PField(6, 2, ByteArray(0))))
+        val heroFile = File.createTempFile("regression_square_index", ".dat")
+        heroFile.deleteOnExit()
+        heroFile.writeBytes(SaveCipher.encrypt(heroBytes))
+
+        assertEquals(1, ItemRepository.addItemsToHero(heroFile, gbid = 1L, quantity = 1))
+
+        val top = parseFields(SaveCipher.decrypt(heroFile.readBytes()))
+        val itemsList = top.first { it.fieldNumber == 6 && it.wireType == 2 }
+        val entry = parseFields(itemsList.bytesValue()).first { it.fieldNumber == 1 && it.wireType == 2 }
+        val squareIndexField = parseFields(entry.bytesValue()).first { it.fieldNumber == 6 && it.wireType == 0 }
+
+        // What a real game (real sint32 decode) would see -- must be exactly 16,
+        // the logical slot we intended, not 8 (16 misread as a plain varint then
+        // zigzag-decoded).
+        assertEquals(16L, realZigzagDecode(squareIndexField.longValue()))
+
+        // Our own read path must agree (decode-consistency for collision avoidance).
+        assertEquals(16, ItemRepository.readHeroItems(heroFile).single().slot)
     }
 }

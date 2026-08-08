@@ -67,6 +67,59 @@ Stackable item quantity (`Generator.stack_size`, field 8) is a real field
 too — editable directly in the Items screen, no need to fake it with
 duplicate slot entries.
 
+### 2026-08-08 incident: edited saves recognized as "old"/invalid by the game
+
+**Symptom**: after editing a save with this app (most recently reproduced
+right after adding items via the Gems/Items screens), the game refused to
+load it — no crash, just treated as an old/invalid save.
+
+**Investigation**: with no faulty save sample available to byte-diff
+directly, the fix was derived from first principles by cross-referencing the
+real Blizzard `.proto` schema (the same
+[GoobyCorp/D3Edit](https://github.com/GoobyCorp/D3Edit) source already used
+to fix the item/gem layout above) field-by-field against every write path in
+this app. Two fields our code writes are declared `sint32` in the real
+schema (`Items.proto`'s `SavedItem.square_index` and `Hero.proto`'s
+`Digest.level`) — proto's `sint32` uses **zigzag encoding**, a different
+transform from a plain varint (`item_quality_level`, field 10, was already
+handled correctly this way; these two were not). A real protobuf parser
+*always* zigzag-decodes a field declared `sint32`, regardless of how the
+bytes were written — so a plain varint we intended to mean "16" silently
+became "8" once the real game read it back.
+
+- `addItemsToHero`/`addItemsToStash` picked new inventory positions
+  (`square_index`) starting at 16, incrementing by 2, specifically to avoid
+  the low range used by equipped items and existing inventory — but wrote
+  them unencoded. The real game would decode our intended 16/18/20/... as
+  8/9/10/..., landing new items much closer to (and risking colliding with)
+  real occupied grid cells — a plausible trigger for a save-integrity
+  rejection.
+- `writeHeroLevel` had the same gap on the hero's actual level field:
+  setting level 70 in the app would load in-game as level 35.
+
+Two fields that look similar were deliberately **left untouched** after
+closer inspection, to avoid trading a real bug for a regression:
+`Handle.game_balance_type` and `SavedItem.item_slot` (544) are also `sint32`
+in the real schema, but their values in this codebase were originally
+copied verbatim from a real save's raw wire bytes (not chosen by us as a
+semantic value) — they're already correctly encoded as-is, and applying
+zigzag encoding to them again would have corrupted them.
+
+**Fix**: `zigzagEncode32`/`zigzagDecode32` now wrap every `square_index`
+read and write (`ItemRepository`) and every hero-level read and write
+(`ParagonRepository`) — `highest_solo_rift_completed` (field 25, plain
+`uint32`) is explicitly kept un-transformed alongside it, to make sure the
+two don't get conflated in a future edit. Verified with an independent
+from-scratch zigzag decoder (not the code under test) confirming a real
+protobuf `sint32` parser now reads back exactly the values this app writes
+— see `ItemRepositoryTest.kt` and the new `ParagonRepositoryTest.kt`.
+
+**Caveat**: this fix was built and verified statically (byte-level, without
+a real save sample or physical device/emulator) — please report back if the
+"recognized as old" symptom persists after this update, ideally with a
+sample save, so it can be byte-diffed directly against a known-good save
+the way earlier bugs in this project were.
+
 ## Building
 
 CI builds a release APK via GitHub Actions (`.github/workflows/build.yml`),

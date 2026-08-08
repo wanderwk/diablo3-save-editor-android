@@ -18,9 +18,17 @@ import kotlin.random.Random
  *   field 1 (message) id: ItemId{id_high, id_low} (both uint64 varint)
  *   field 5 (varint)  item_slot (equip-slot enum -- semantics not fully
  *                      mapped yet, not used here)
- *   field 6 (varint)  square_index -- inventory GRID position; this is
- *                      what we use as "slot" for bucketing into
- *                      equipped/inventory/stash and finding free cells
+ *   field 6 (varint)  square_index -- SINT32 (zigzag-encoded, confirmed
+ *                      against the real Items.proto same as field 10 below).
+ *                      This is what we use as "slot" for bucketing into
+ *                      equipped/inventory/stash and finding free cells.
+ *                      Existing items round-trip their raw wire bytes
+ *                      untouched regardless (we never re-encode a value we
+ *                      didn't decode ourselves), but any BRAND NEW item we
+ *                      construct (makeItemEntry) must zigzag-*encode* the
+ *                      square_index we pick, or the real game decodes it to
+ *                      a different (halved) cell than we intended, risking
+ *                      a collision with a real item's actual grid position.
  *   field 8 (message) generator: see Generator below
  *
  * `Generator` (SavedItem field 8 -- previously wrongly treated as
@@ -105,6 +113,13 @@ object ItemRepository {
         return ((n ushr 1) xor -(n and 1)).toLong()
     }
 
+    /** Inverse of [zigzagDecode32] -- required for any sint32 field we construct ourselves
+     * (as opposed to fields whose raw wire bytes we just copy verbatim from a real item). */
+    private fun zigzagEncode32(value: Long): Long {
+        val n = value.toInt()
+        return (((n shl 1) xor (n shr 31)).toLong()) and 0xFFFFFFFFL
+    }
+
     private fun leFixed32ToLong(b: ByteArray): Long {
         val raw = (b[0].toInt() and 0xFF) or ((b[1].toInt() and 0xFF) shl 8) or
             ((b[2].toInt() and 0xFF) shl 16) or ((b[3].toInt() and 0xFF) shl 24)
@@ -131,7 +146,7 @@ object ItemRepository {
 
         for (f in parseFields(entryBytes)) {
             when {
-                f.fieldNumber == 6 && f.wireType == 0 -> slot = f.longValue().toInt()
+                f.fieldNumber == 6 && f.wireType == 0 -> slot = zigzagDecode32(f.longValue()).toInt()
                 f.fieldNumber == 7 && f.wireType == 0 -> usedSocketCount = f.longValue().toInt()
                 f.fieldNumber == 8 && f.wireType == 2 -> rawGenerator = f.bytesValue()
                 f.fieldNumber == 1 && f.wireType == 2 -> {
@@ -487,7 +502,7 @@ object ItemRepository {
                 PField(1, 2, uid),
                 PField(4, 0, 0L),
                 PField(5, 0, 544L),
-                PField(6, 0, slot.toLong()),
+                PField(6, 0, zigzagEncode32(slot.toLong())),
                 PField(7, 0, 0L),
                 PField(8, 2, generator),
             )

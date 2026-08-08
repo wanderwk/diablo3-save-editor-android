@@ -9,6 +9,21 @@ import java.io.File
  */
 object ParagonRepository {
 
+    /** hero.dat field 2 -> field 5 (Digest.level) is SINT32 (zigzag-encoded) per the
+     * real Hero.proto ("required sint32 level = 5"). Writing/reading it as a plain
+     * varint silently halves whatever value the user sets once the real game decodes
+     * it. field 25 (highest_solo_rift_completed) is plain uint32 and must NOT be
+     * zigzag-transformed. */
+    private fun zigzagDecode32(value: Long): Long {
+        val n = value.toInt()
+        return ((n ushr 1) xor -(n and 1)).toLong()
+    }
+
+    private fun zigzagEncode32(value: Long): Long {
+        val n = value.toInt()
+        return (((n shl 1) xor (n shr 31)).toLong()) and 0xFFFFFFFFL
+    }
+
     const val PARAGON_XP_PER_LEVEL = 640_000L
     const val PARAGON_MAX = 10_000
     const val GREATER_RIFT_MAX = 150
@@ -66,7 +81,7 @@ object ParagonRepository {
             when {
                 f.fieldNumber == 3 && f.wireType == 2 ->
                     name = runCatching { String(f.bytesValue(), Charsets.US_ASCII) }.getOrDefault("")
-                f.fieldNumber == 5 && f.wireType == 0 -> level = f.longValue().toInt()
+                f.fieldNumber == 5 && f.wireType == 0 -> level = zigzagDecode32(f.longValue()).toInt()
                 f.fieldNumber == 4 && f.wireType == 5 -> {
                     val b = f.bytesValue()
                     classId = (b[0].toLong() and 0xFF) or ((b[1].toLong() and 0xFF) shl 8) or
@@ -85,6 +100,10 @@ object ParagonRepository {
         writeHeroIntField(heroFile, fieldNumber = 25, value = newValue.coerceIn(0, GREATER_RIFT_MAX).toLong())
 
     private fun writeHeroIntField(heroFile: File, fieldNumber: Int, value: Long): Boolean {
+        // Only Digest.level (field 5) is sint32 on the wire; highest_solo_rift_completed
+        // (field 25) is plain uint32 and must be written as-is.
+        val wireValue = if (fieldNumber == 5) zigzagEncode32(value) else value
+
         val decrypted = SaveCipher.decrypt(heroFile.readBytes())
         val top = parseFields(decrypted)
 
@@ -94,9 +113,9 @@ object ParagonRepository {
 
         val fieldIdx = inner.indexOfFirst { it.fieldNumber == fieldNumber && it.wireType == 0 }
         if (fieldIdx >= 0) {
-            inner[fieldIdx] = PField(fieldNumber, 0, value)
+            inner[fieldIdx] = PField(fieldNumber, 0, wireValue)
         } else {
-            inner.add(PField(fieldNumber, 0, value))
+            inner.add(PField(fieldNumber, 0, wireValue))
         }
         top[idx] = PField(2, 2, serializeFields(inner))
 
